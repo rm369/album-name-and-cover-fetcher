@@ -1,4 +1,6 @@
 import argparse
+import datetime
+import logging
 import os
 import sys
 import time
@@ -7,6 +9,7 @@ import mutagen
 import yaml
 from mutagen.id3 import ID3, TALB, TPE1, TIT2, APIC, ID3NoHeaderError
 from requests.auth import HTTPBasicAuth
+from dateutil.parser import parse
 
 # Spotify API credentials
 spotify_credentials_file = "spotify_credentials.yaml"
@@ -41,7 +44,7 @@ def get_from_spotify(url, params):
         response = requests.get(url, headers=headers, params=params)
         if response.status_code == 429: # 'Too many requests'
             retry_after_time = response.headers['retry-after']
-            print(f"Too many requests, sleeping {retry_after_time} seconds...")
+            logging.info(f"Too many requests, sleeping {retry_after_time} seconds...")
             for i in range(int(retry_after_time), 0, -1):
                 sys.stdout.write("\r")
                 sys.stdout.write(str(i) + ' ')
@@ -59,74 +62,76 @@ def get_album_info_from_spotify(artist, title):
     params = {
         "q": f"artist:{artist} track:{title}",
         "type": "track",
-        "limit": 1,
+        "limit": 20,
     }
     response = get_from_spotify(url, params)
     response_data = response.json()
 
     # Debugging: Print the response data
-    print("Spotify API response:", response_data)
+    # logging.debug("Spotify API response:", response_data)
 
-    if 'tracks' in response_data and response_data['tracks']['items']:
-        track = response_data['tracks']['items'][0]
-        album_title = track['album']['name']
-        album_id = track['album']['id']
-        print(f"Found album: {album_title} with ID: {album_id} for artist: {artist} and title: {title}")
-        return album_title, album_id
-    else:
-        print(f"No suitable album found for artist: {artist} and title: {title}. Album name will not be changed.")
-        return None, None
+    a = {} # album data found - use first released with cover images, otherwise first released
+    if 'tracks' in response_data and 'items' in response_data['tracks']:
+        for track in response_data['tracks']['items']:
+            if 'album' in track:
+                album = track['album']
+                if 'release_date' in album:
+                    release_date = parse(album['release_date'])
+                else:
+                    release_date = datetime.date.today()
+                if 'images' in album and len(album['images']) > 0:
+                    cover_url = album['images'][0]['url']
+                else:
+                    cover_url = None
+                if not a \
+                    or (release_date < a['release_date']
+                        and (cover_url or not a.get('cover_url'))):
+                    # if no album found yet or older than stored album and cover found or no cover also in stored album
+                    a['release_date'] = release_date
+                    a['cover_url'] = cover_url
+                    a['album_title'] = album['name']
+                    a['album_id'] = album['id']
+    return a
 
-def get_cover_art_from_spotify(album_id):
-    if not album_id:
-        return None
-    album_url = f"https://api.spotify.com/v1/albums/{album_id}"
-    response = get_from_spotify(album_url, {})
-    response_data = response.json()
-    if response_data.get('images'):
-        cover_art_url = response_data['images'][0]['url']
-        cover_art_data = requests.get(cover_art_url).content
-        print(f"Found cover art for album ID: {album_id}")
-        return cover_art_data
-    else:
-        print(f"No cover art found for album ID: {album_id}")
-        return None
 
 def update_file_metadata(file_path):
-    print(f"Processing file: {file_path}")
+    logging.info(f"Processing file: {file_path}")
     try:
         audio = ID3(file_path)
     except ID3NoHeaderError:
-        print(f"No ID3 header found for file: {file_path}. Skipping.")
+        logging.info(f"No ID3 header found for file: {file_path}. Skipping.")
         return
     
     artist_frame = audio.get('TPE1', None)
     title_frame = audio.get('TIT2', None)
-    if not artist_frame or not title_frame:
-        print("Artist or title tag not found. Skipping file.")
-        return
-    
     artist = artist_frame.text[0] if artist_frame and isinstance(artist_frame, mutagen.id3.TextFrame) else None
     title = title_frame.text[0] if title_frame and isinstance(title_frame, mutagen.id3.TextFrame) else None
-    
     if not artist or not title:
-        print("Artist or title tag not correctly formatted. Skipping file.")
+        logging.info("Artist or title tag not found in ID3. Skipping file.")
         return
+
+    logging.info(f"Artist: {artist}, Title: {title}")
     
-    print(f"Artist: {artist}, Title: {title}")
-    
-    album_title, album_id = get_album_info_from_spotify(artist, title)
+    a = get_album_info_from_spotify(artist, title)
+    if a:
+        logging.info(f"Found album: {a} for artist: {artist} and title: {title}")
+    else:
+        logging.info(f"No suitable album found for artist: {artist} and title: {title}. Album data will not be changed.")
+        return
 
     updated = False
-    if album_title and album_title != audio.get('TALB', None):
+    album_tile_old = audio.get('TALB', None)
+    if a['album_title'] != album_tile_old:
+        logging.info(f"Replacing album tag {album_tile_old} with {a['album_title']}")
         audio.delall('TALB')
-        audio.add(TALB(encoding=3, text=album_title))
+        audio.add(TALB(encoding=3, text=a['album_title']))
         updated = True
 
     cover_art_data_old = audio.get('APIC:Cover', None)
-    if album_id: # and not cover_art_data_old:
-        cover_art_data = get_cover_art_from_spotify(album_id)
+    if a['cover_url']: # and not cover_art_data_old:
+        cover_art_data = requests.get(a['cover_url']).content
         if cover_art_data != cover_art_data_old:
+            logging.info(f"Replacing album cover")
             audio.delall('APIC')
             audio.add(APIC(
                 encoding=3,
@@ -138,7 +143,6 @@ def update_file_metadata(file_path):
 
     if updated:
         audio.save(file_path)
-        print(f"Updated file: {file_path} with album: {album_title if album_title else 'No change'}")
 
 def process_folder(folder_path):
     for root, _, files in os.walk(folder_path):
@@ -149,13 +153,15 @@ def process_folder(folder_path):
 
 if __name__ == "__main__":
 
-    with open(spotify_credentials_file, "r") as f:
-        spotify_credentials = yaml.safe_load(f)
-    get_spotify_access_token()
-
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
     args = parser.parse_args()
     folder_path = args.path
 
+    with open(spotify_credentials_file, "r") as f:
+        spotify_credentials = yaml.safe_load(f)
+    get_spotify_access_token()
+
+    logging.basicConfig(format="%(asctime)s: %(message)s", level=logging.INFO,
+                        datefmt="%H:%M:%S")
     process_folder(folder_path)

@@ -18,6 +18,14 @@ spotify_credentials_file = "spotify_credentials.yaml"
 spotify_credentials = {}
 access_token = None
 
+no_id3 = {}
+no_album = {}
+no_cover = {}
+no_id3_filename = "log/no_id3.yaml"
+no_album_filename = "log/no_album.yaml"
+no_cover_filename = "log/no_cover.yaml"
+log_filename = "log/album_info_art_fetcher.log"
+
 def get_spotify_access_token():
     global access_token
     url = "https://accounts.spotify.com/api/token"
@@ -102,6 +110,7 @@ def update_file_metadata(file_path):
         audio = ID3(file_path)
     except ID3NoHeaderError:
         logging.info(f"No ID3 header found for file: {file_path}. Skipping.")
+        no_id3[file_path] = None
         return
     
     artist_frame = audio.get('TPE1', None)
@@ -110,6 +119,7 @@ def update_file_metadata(file_path):
     title = title_frame.text[0] if title_frame and isinstance(title_frame, mutagen.id3.TextFrame) else None
     if not artist or not title:
         logging.info("Artist or title tag not found in ID3. Skipping file.")
+        no_id3[file_path] = {'artist': artist, 'title': title}
         return
 
     logging.info(f"Artist: {artist}, Title: {title}")
@@ -119,6 +129,7 @@ def update_file_metadata(file_path):
         logging.info(f"Found album: {a} for artist: {artist} and title: {title}")
     else:
         logging.info(f"No suitable album found for artist: {artist} and title: {title}. Album data will not be changed.")
+        no_album[file_path] = {'artist': artist, 'title': title}
         return
 
     updated = False
@@ -142,6 +153,8 @@ def update_file_metadata(file_path):
                 data=cover_art_data
             ))
             updated = True
+    else:
+        no_cover[file_path] = {'artist': artist, 'title': title, 'album': a['album_title']}
 
     if updated:
         audio.save(file_path)
@@ -154,6 +167,13 @@ def process_folder(folder_path):
                 update_file_metadata(file_path)
 
 if __name__ == "__main__":
+    logging.basicConfig(format="%(asctime)s: %(message)s",
+                        level=logging.INFO,
+                        datefmt="%Y-%m-%d %H:%M:%S",
+                        handlers=[
+                            logging.FileHandler(log_filename),
+                            logging.StreamHandler()
+                        ])
 
     with open(spotify_credentials_file, "r") as f:
         spotify_credentials = yaml.safe_load(f)
@@ -173,6 +193,11 @@ if __name__ == "__main__":
         spotify_credentials['secret'] = args.spotify_secret
     get_spotify_access_token()
 
-    logging.basicConfig(format="%(asctime)s: %(message)s", level=logging.INFO,
-                        datefmt="%H:%M:%S")
     process_folder(args.path)
+
+    with open(no_id3_filename, "a"):
+        yaml.dump(no_id3)
+    with open(no_album_filename, "a"):
+        yaml.dump(no_album)
+    with open(no_cover_filename, "a"):
+        yaml.dump(no_cover)

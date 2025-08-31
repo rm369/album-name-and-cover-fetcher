@@ -86,7 +86,10 @@ def get_album_info_from_spotify(artist, title):
             if 'album' in track:
                 album = track['album']
                 if 'release_date' in album:
-                    release_date = parse(album['release_date'])
+                    try:
+                        release_date = parse(album['release_date'])
+                    except ValueError:
+                        release_date = datetime.date.today()
                 else:
                     release_date = datetime.date.today()
                 if 'images' in album and len(album['images']) > 0:
@@ -105,6 +108,7 @@ def get_album_info_from_spotify(artist, title):
 
 
 def update_file_metadata(file_path):
+    global no_id3, no_album, no_cover
     logging.info(f"Processing file: {file_path}")
     try:
         audio = ID3(file_path)

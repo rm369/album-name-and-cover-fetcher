@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import datetime
 import logging
@@ -153,15 +155,24 @@ def process_folder(folder_path):
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("path")
-    args = parser.parse_args()
-    folder_path = args.path
-
     with open(spotify_credentials_file, "r") as f:
         spotify_credentials = yaml.safe_load(f)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path",
+                        help="root path")
+    parser.add_argument("--spotify_id",
+                        help="Spotify ID (request App at https://developer.spotify.com/dashboard")
+    parser.add_argument("--spotify_secret",
+                        help="Spotify secret")
+    args = parser.parse_args()
+
+    if args.spotify_id:
+        spotify_credentials['id'] = args.spotify_id
+    if args.spotify_secret:
+        spotify_credentials['secret'] = args.spotify_secret
     get_spotify_access_token()
 
     logging.basicConfig(format="%(asctime)s: %(message)s", level=logging.INFO,
                         datefmt="%H:%M:%S")
-    process_folder(folder_path)
+    process_folder(args.path)

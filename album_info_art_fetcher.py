@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import argparse
 import datetime
 import logging
@@ -18,12 +17,6 @@ spotify_credentials_file = "spotify_credentials.yaml"
 spotify_credentials = {}
 access_token = None
 
-no_id3 = {}
-no_album = {}
-no_cover = {}
-no_id3_filename = "log/no_id3.yaml"
-no_album_filename = "log/no_album.yaml"
-no_cover_filename = "log/no_cover.yaml"
 log_filename = "log/album_info_art_fetcher.log"
 
 def get_spotify_access_token():
@@ -55,17 +48,17 @@ def get_from_spotify(url, params):
         if response.status_code == 429: # 'Too many requests'
             retry_after_time = response.headers['retry-after']
             logging.info(f"Too many requests, sleeping {retry_after_time} seconds...")
-            for i in range(int(retry_after_time), 0, -1):
+            for i in range(int(retry_after_time) + 2, 0, -1):
                 sys.stdout.write("\r")
                 sys.stdout.write(str(i) + ' ')
                 sys.stdout.flush()
                 time.sleep(1)
-                response = requests.get(url, headers=headers, params=params) # retry
         elif response.status_code == 401: # 'The access token expired'
             get_spotify_access_token()
         else:
             # retry = False
             return response
+
 
 def get_album_info_from_spotify(artist, title):
     url = "https://api.spotify.com/v1/search"
@@ -76,8 +69,6 @@ def get_album_info_from_spotify(artist, title):
     }
     response = get_from_spotify(url, params)
     response_data = response.json()
-
-    # Debugging: Print the response data
     # logging.debug("Spotify API response:", response_data)
 
     a = {} # album data found - use first released with cover images, otherwise first released
@@ -89,11 +80,11 @@ def get_album_info_from_spotify(artist, title):
                     try:
                         release_date = parse(album['release_date'])
                     except ValueError:
-                        release_date = datetime.date.today()
+                        release_date = datetime.datetime.now()
                 else:
-                    release_date = datetime.date.today()
+                    release_date = datetime.datetime.now()
                 if 'images' in album and len(album['images']) > 0:
-                    cover_url = album['images'][0]['url']
+                    cover_url = album['images'][0]['url'] # biggest is first
                 else:
                     cover_url = None
                 if not a \
@@ -107,25 +98,22 @@ def get_album_info_from_spotify(artist, title):
     return a
 
 
-def update_file_metadata(file_path):
-    global no_id3, no_album, no_cover
+def update_file_metadata(file_path, cache):
     logging.info(f"Processing file: {file_path}")
     try:
         audio = ID3(file_path)
     except ID3NoHeaderError:
         logging.info(f"No ID3 header found for file: {file_path}. Skipping.")
-        no_id3[file_path] = None
+        cache[file_path] = None
         return
-    
     artist_frame = audio.get('TPE1', None)
     title_frame = audio.get('TIT2', None)
     artist = artist_frame.text[0] if artist_frame and isinstance(artist_frame, mutagen.id3.TextFrame) else None
     title = title_frame.text[0] if title_frame and isinstance(title_frame, mutagen.id3.TextFrame) else None
     if not artist or not title:
         logging.info("Artist or title tag not found in ID3. Skipping file.")
-        no_id3[file_path] = {'artist': artist, 'title': title}
+        cache[file_path] = {'artist': artist, 'title': title}
         return
-
     logging.info(f"Artist: {artist}, Title: {title}")
     
     a = get_album_info_from_spotify(artist, title)
@@ -133,7 +121,7 @@ def update_file_metadata(file_path):
         logging.info(f"Found album: {a} for artist: {artist} and title: {title}")
     else:
         logging.info(f"No suitable album found for artist: {artist} and title: {title}. Album data will not be changed.")
-        no_album[file_path] = {'artist': artist, 'title': title}
+        cache[file_path] = {'artist': artist, 'title': title}
         return
 
     updated = False
@@ -146,6 +134,7 @@ def update_file_metadata(file_path):
 
     cover_art_data_old = audio.get('APIC:Cover', None)
     if a['cover_url']: # and not cover_art_data_old:
+        cache[file_path] = {'artist': artist, 'title': title, 'album': a['album_title'], 'cover_url': a['cover_url']}
         cover_art_data = requests.get(a['cover_url']).content
         if cover_art_data != cover_art_data_old:
             logging.info(f"Replacing album cover")
@@ -158,19 +147,39 @@ def update_file_metadata(file_path):
             ))
             updated = True
     else:
-        no_cover[file_path] = {'artist': artist, 'title': title, 'album': a['album_title']}
+        cache[file_path] = {'artist': artist, 'title': title, 'album': a['album_title']}
 
     if updated:
         audio.save(file_path)
 
-def process_folder(folder_path):
+
+def process_folder(folder_path, cache):
     for root, _, files in os.walk(folder_path):
         for file in files:
             if file.endswith(('.mp3', '.flac', '.ogg', '.m4a')):
                 file_path = os.path.join(root, file)
-                update_file_metadata(file_path)
+                if file_path not in cache or 'cover_url' not in cache[file_path]:
+                    update_file_metadata(file_path, cache)
+
 
 if __name__ == "__main__":
+
+    with open(spotify_credentials_file, "r") as f:
+        spotify_credentials = yaml.safe_load(f)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path",
+                        help="root path")
+    parser.add_argument("--cache",
+                        help="name of cache yaml file")
+    parser.add_argument("--missing",
+                        help="name of created yaml file with all files for which no cover is found")
+    parser.add_argument("--spotify_id",
+                        help="Spotify ID (request App at https://developer.spotify.com/dashboard")
+    parser.add_argument("--spotify_secret",
+                        help="Spotify secret")
+    args = parser.parse_args()
+
     logging.basicConfig(format="%(asctime)s: %(message)s",
                         level=logging.INFO,
                         datefmt="%Y-%m-%d %H:%M:%S",
@@ -179,29 +188,28 @@ if __name__ == "__main__":
                             logging.StreamHandler()
                         ])
 
-    with open(spotify_credentials_file, "r") as f:
-        spotify_credentials = yaml.safe_load(f)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("path",
-                        help="root path")
-    parser.add_argument("--spotify_id",
-                        help="Spotify ID (request App at https://developer.spotify.com/dashboard")
-    parser.add_argument("--spotify_secret",
-                        help="Spotify secret")
-    args = parser.parse_args()
-
     if args.spotify_id:
         spotify_credentials['id'] = args.spotify_id
     if args.spotify_secret:
         spotify_credentials['secret'] = args.spotify_secret
     get_spotify_access_token()
 
-    process_folder(args.path)
+    if args.cache:
+        try:
+            with open(args.cache, "r") as f:
+                cache = yaml.safe_load(f)
+        except Exception as e:
+            logging.debug(f"Couldn't load cache file {args.cache}, starting with empty cache.")
+            cache = {}
+    else:
+        cache = {}
+    process_folder(args.path, cache)
 
-    with open(no_id3_filename, "a"):
-        yaml.dump(no_id3)
-    with open(no_album_filename, "a"):
-        yaml.dump(no_album)
-    with open(no_cover_filename, "a"):
-        yaml.dump(no_cover)
+    if args.cache:
+        with open(args.cache, "w") as f:
+            f.write(yaml.dump(cache, allow_unicode=True))
+
+    if args.missing:
+        missing = {d for d in cache if 'cover_url' not in d}
+        with open(args.missing, "w") as f:
+            f.write(yaml.dump(missing, allow_unicode=True))
